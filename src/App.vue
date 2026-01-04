@@ -26,6 +26,12 @@ const selectedOption = ref(null)
 const hasSubmitted = ref(false)
 const submitResult = ref(null)
 
+//评论状态
+const currentUserId = ref(null) // 关键：存用户ID
+const commentList = ref([])
+const myComment = ref('')
+
+
 // ==========================================
 // 2. 题库数据 (保持不变)
 // ==========================================
@@ -78,6 +84,7 @@ async function handleAuth() {
 
     // 逻辑判定
     if (data.code === 200) {
+      currentUserId.value = data.data.id
       if (isRegisterMode.value) {
         // 注册成功 -> 切换回登录
         alert('注册成功，请直接登录！')
@@ -166,6 +173,10 @@ function enterQuestion(q) {
   selectedOption.value = null
   hasSubmitted.value = false
   submitResult.value = null
+
+  //加载评论
+  commentList.value = []
+  fetchComments(q.id)
 }
 
 function selectOption(id) {
@@ -187,6 +198,64 @@ function getOptionClass(id) {
   if (id === currentQuestion.value.correct) return 'correct'
   if (id === selectedOption.value) return 'wrong'
   return ''
+}
+// 获取评论函数
+async function fetchComments(qid) {
+  try {
+    const res = await fetch(`${API_BASE}/comment/list?questionId=${qid}`)
+    const data = await res.json()
+    if (data.code === 200) commentList.value = data.data
+  } catch (e) { console.error(e) }
+}
+
+//提交评论函数
+async function submitComment() {
+  if (!myComment.value.trim()) return alert('说点什么吧')
+  if (!currentUserId.value) return alert('请先登录')
+
+  const res = await fetch(`${API_BASE}/comment/add`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      userId: currentUserId.value,
+      questionId: currentQuestion.value.id,
+      content: myComment.value
+    })
+  })
+  const data = await res.json()
+  if (data.code === 200) {
+    myComment.value = ''
+    fetchComments(currentQuestion.value.id)
+  } else {
+    alert(data.msg)
+  }
+}
+
+// 处理点赞/点踩
+async function handleAction(comment, type) {
+  if (!currentUserId.value) return alert('请先登录')
+  if (type === 1) comment.likeCount = (comment.likeCount || 0) + 1
+  if (type === 2) comment.dislikeCount = (comment.dislikeCount || 0) + 1
+
+  const res = await fetch(`${API_BASE}/comment/action`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      userId: currentUserId.value,
+      commentId: comment.id,
+      type: type
+    })
+  })
+  const data = await res.json()
+  
+  if (data.code !== 200) {
+    alert(data.msg) // 如果重复点赞，报错
+    // 回滚数字
+    if (type === 1) comment.likeCount--
+    if (type === 2) comment.dislikeCount--
+  } else if (type === 3) {
+    alert('举报成功')
+  }
 }
 </script>
 
@@ -328,6 +397,34 @@ function getOptionClass(id) {
                 <div :class="submitResult.type">{{ submitResult.text }}</div>
                 <div class="explanation">解析：{{ currentQuestion.explanation }}</div>
               </div>
+              <div class="comment-section">
+                <h3>💬 互动讨论区</h3>
+
+                <div class="input-area">
+                  <textarea v-model="myComment" placeholder="发表你的高见..."></textarea>
+                  <button @click="submitComment">发送</button>
+                </div>
+
+                <div class="comment-list">
+                  <div v-if="commentList.length === 0" style="color:#999;text-align:center">暂无评论</div>
+                  
+                  <div v-for="c in commentList" :key="c.id" class="c-item">
+                    <div class="c-head">
+                      <span class="avatar">{{ c.nickname ? c.nickname[0] : '某' }}</span>
+                      <span class="name">{{ c.nickname || '神秘考友' }}</span>
+                      <span class="date">{{ c.createTime?.replace('T', ' ').slice(0,16) }}</span>
+                    </div>
+                    
+                    <div class="c-content">{{ c.content }}</div>
+                    
+                    <div class="c-actions">
+                      <span @click="handleAction(c, 1)" class="act-btn">👍 {{ c.likeCount || 0 }}</span>
+                      <span @click="handleAction(c, 2)" class="act-btn">👎 {{ c.dislikeCount || 0 }}</span>
+                      <span @click="handleAction(c, 3)" class="act-btn report">🚩 举报</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -454,4 +551,22 @@ function getOptionClass(id) {
 .explanation { margin-top: 10px; color: #666; font-size: 14px; line-height: 1.6; }
 .success { color: #27ae60; font-weight: bold; font-size: 18px; }
 .error { color: #c0392b; font-weight: bold; font-size: 18px; }
+/* 评论区整体 */
+.comment-section { margin-top: 40px; border-top: 1px solid #eee; padding-top: 20px; }
+
+/* 输入区 */
+.input-area textarea { width: 100%; height: 80px; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
+.input-area button { margin-top: 10px; float: right; background: #3498db; color: white; border: none; padding: 5px 15px; border-radius: 4px; cursor: pointer; }
+
+/* 列表项 */
+.comment-list { margin-top: 50px; }
+.c-item { background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 15px; }
+.c-head { display: flex; align-items: center; margin-bottom: 10px; font-size: 14px; color: #666; }
+.avatar { width: 28px; height: 28px; background: #9b59b6; color: white; border-radius: 50%; text-align: center; line-height: 28px; margin-right: 8px; font-size: 12px; }
+.name { font-weight: bold; margin-right: auto; }
+
+/* 动作按钮栏 */
+.c-actions { margin-top: 10px; display: flex; gap: 15px; font-size: 13px; color: #777; cursor: pointer; }
+.act-btn:hover { color: #3498db; }
+.report:hover { color: red; }
 </style>
