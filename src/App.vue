@@ -1,11 +1,34 @@
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed ,onMounted} from 'vue'
+
+onMounted(() => {
+  // 1. 尝试从缓存恢复登录信息
+  const savedUser = localStorage.getItem('user')
+  if (savedUser) {
+    try {
+      const parsedUser = JSON.parse(savedUser)
+      currentUser.value = parsedUser
+      isLoggedIn.value = true
+      
+      // 新增：如果是管理员，刷新后立刻拉取用户列表
+      if (parsedUser.role === 'ADMIN') {
+        fetchUserList(); 
+      }
+      
+    } catch (e) {
+      localStorage.removeItem('user')
+    }
+  }
+
+  // 2. 加载题目
+  fetchQuestions()
+})
 
 // ================= 0. 配置区 =================
 // 确保这里指向你的 SpringBoot 端口
 const API_BASE = 'http://localhost:8080/api'
 
-// 分类配置 (保持 Eazy 风格)
+// 分类配置 (保持 Easy 风格)
 const categories = [
   { id: 'politics', name: '政治理论', icon: '🚩', color: '#c0392b', bg: '#fadbd8' },
   { id: 'common',   name: '常识判断', icon: '🌍', color: '#e67e22', bg: '#fdebd0' },
@@ -24,15 +47,7 @@ const isRegisterMode = ref(false) // false=登录模式, true=注册模式
 const authForm = reactive({ username: '', password: '', confirmPassword: '' })
 
 // 题目数据
-const questions = ref([
-  { id: 101, type: 'politics', title: '党的二十大报告指出，中国式现代化的本质要求是？', options: ['A. 坚持中国共产党领导', 'B. 坚持改革开放', 'C. 丰富人民精神世界', 'D. 实现高质量发展'], answer: 'A. 坚持中国共产党领导', explain: '💡 知识点：二十大报告明确指出，中国式现代化的本质要求是：坚持中国共产党领导...' },
-  { id: 201, type: 'common', title: '关于“天宫一号”，下面哪个说法是对的？', options: ['A. 中国第一个空间实验室', 'B. 载人飞船', 'C. 气象卫星', 'D. 探月工程'], answer: 'A. 中国第一个空间实验室', explain: '💡 冷知识：天宫一号是中国第一个目标飞行器和空间实验室，不是飞船哦。' },
-  { id: 301, type: 'verbal', title: '填个词让句子通顺：“历史是最好的教科书，我们____历史，是为了总结经验。”', options: ['A. 学习', 'B. 借鉴', 'C. 回顾', 'D. 研究'], answer: 'A. 学习', explain: '💡 思路：搭配“历史”且后文提到了“总结经验”，用“学习”最自然。' },
-  { id: 401, type: 'logic', title: '类比推理：医生之于患者，好比教师之于？', options: ['A. 学校', 'B. 学生', 'C. 教材', 'D. 教室'], answer: 'B. 学生', explain: '💡 逻辑链：职业 vs 服务对象的关系。' },
-  { id: 501, type: 'math', title: '甲乙两地相距100公里，A车60km/h，B车40km/h，相向而行多久相遇？', options: ['A. 30分钟', 'B. 1小时', 'C. 1.5小时', 'D. 2小时'], answer: 'B. 1小时', explain: '💡 算式：时间 = 路程 / (速度A + 速度B) = 100 / 100 = 1。' },
-  { id: 601, type: 'data', title: '去年GDP是10万亿，今年增长5.2%，算算今年是多少？', options: ['A. 10.52万亿', 'B. 10.5万亿', 'C. 11.2万亿', 'D. 10.2万亿'], answer: 'A. 10.52万亿', explain: '💡 速算：10 × (1 + 0.052) = 10.52，口算就能出来！' }
-])
-
+const questions = ref([])
 const currentQuestion = ref(null)
 const selectedOption = ref(null)
 const showResult = ref(false)
@@ -43,6 +58,22 @@ const userList = ref([])
 const auditModalVisible = ref(false)
 const auditComments = ref([])
 const auditTargetUser = ref('')
+
+// 题目上传相关状态
+const showUploadPanel = ref(false)
+const uploadForm = reactive({
+  categoryId: 'politics', // 改为使用分类ID
+  title: '',
+  options: ['A. ', 'B. ', 'C. ', 'D. '],
+  answer: '',
+  explanation: ''
+})
+
+// 管理员审核相关状态
+const showReviewPanel = ref(false)
+const pendingQuestions = ref([])
+const myUploads = ref([])
+const showMyUploadsPanel = ref(false)
 
 // ================= 计算属性 =================
 const sidebarGroups = computed(() => {
@@ -73,6 +104,7 @@ async function handleLogin() {
     if (data.code === 200) {
       isLoggedIn.value = true
       currentUser.value = data.data // 获取后端返回的用户信息
+      localStorage.setItem('user', JSON.stringify(data.data))
       
       if (currentUser.value.role === 'ADMIN') {
         fetchUserList()
@@ -125,6 +157,7 @@ function handleLogout() {
   authForm.username = ''
   authForm.password = ''
   commentList.value = []
+  localStorage.removeItem('user')
 }
 
 // 4. 业务逻辑 (做题、评论等)
@@ -276,6 +309,194 @@ async function deleteComment(comment) {
     alert('请求失败，请检查网络');
   }
 }
+// 从后端拉取题库
+// ================= 题目上传功能 =================
+async function uploadQuestion() {
+  // 前端校验
+  if (!uploadForm.title.trim()) return alert('题目内容不能为空')
+  if (!uploadForm.answer.trim()) return alert('答案不能为空')
+
+  // 处理选项（固定为选择题）
+  let processedOptions = uploadForm.options.filter(opt => opt.trim())
+  if (processedOptions.length < 2) return alert('选择题至少需要2个选项')
+
+  try {
+    const res = await fetch(`${API_BASE}/question/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: uploadForm.categoryId, // 使用分类ID作为type
+        title: uploadForm.title,
+        options: JSON.stringify(processedOptions),
+        answer: uploadForm.answer,
+        explanation: uploadForm.explanation,
+        uploaderId: currentUser.value.id
+      })
+    })
+    const data = await res.json()
+
+    if (data.code === 200) {
+      alert('🎉 题目上传成功，等待管理员审核')
+      // 重置表单
+      uploadForm.categoryId = 'politics'
+      uploadForm.title = ''
+      uploadForm.options = ['A. ', 'B. ', 'C. ', 'D. ']
+      uploadForm.answer = ''
+      uploadForm.explanation = ''
+      showUploadPanel.value = false
+      // 刷新我的上传记录
+      if (showMyUploadsPanel.value) {
+        fetchMyUploads()
+      }
+    } else {
+      alert(`上传失败: ${data.msg}`)
+    }
+  } catch (e) {
+    alert('网络开小差了，上传请求发送失败')
+  }
+}
+
+// ================= 管理员审核功能 =================
+async function fetchPendingQuestions() {
+  try {
+    const res = await fetch(`${API_BASE}/question/pending`)
+    const data = await res.json()
+    if (data.code === 200) pendingQuestions.value = data.data
+  } catch (e) {
+    console.error("获取待审核题目失败", e)
+  }
+}
+
+async function reviewQuestion(questionId, reviewStatus) {
+  const statusText = reviewStatus === 1 ? '通过' : '拒绝'
+  if (!confirm(`确定要${statusText}这道题目吗？`)) return
+
+  try {
+    const res = await fetch(`${API_BASE}/question/review?id=${questionId}&reviewStatus=${reviewStatus}`, {
+      method: 'POST'
+    })
+    const data = await res.json()
+
+    if (data.code === 200) {
+      alert(`题目${statusText}成功`)
+      // 刷新待审核列表
+      fetchPendingQuestions()
+      // 刷新题目列表
+      fetchQuestions()
+    } else {
+      alert(`操作失败: ${data.msg}`)
+    }
+  } catch (e) {
+    alert('网络请求失败')
+  }
+}
+
+// ================= 我的上传记录功能 =================
+async function fetchMyUploads() {
+  try {
+    const res = await fetch(`${API_BASE}/question/my?uploaderId=${currentUser.value.id}`)
+    const data = await res.json()
+    if (data.code === 200) myUploads.value = data.data
+  } catch (e) {
+    console.error("获取我的上传记录失败", e)
+  }
+}
+
+// ================= 辅助函数 =================
+function addOption() {
+  if (uploadForm.options.length < 8) {
+    uploadForm.options.push(`${String.fromCharCode(65 + uploadForm.options.length)}. `)
+  } else {
+    alert('最多支持8个选项')
+  }
+}
+
+function removeOption(index) {
+  if (uploadForm.options.length > 2) {
+    uploadForm.options.splice(index, 1)
+    // 重新编号
+    uploadForm.options.forEach((opt, i) => {
+      uploadForm.options[i] = `${String.fromCharCode(65 + i)}. ${opt.substring(3)}`
+    })
+  } else {
+    alert('至少需要2个选项')
+  }
+}
+
+function getReviewStatusText(status) {
+  switch(status) {
+    case 0: return '待审核'
+    case 1: return '已通过'
+    case 2: return '已拒绝'
+    default: return '未知'
+  }
+}
+
+function getReviewStatusClass(status) {
+  switch(status) {
+    case 0: return 'status-pending'
+    case 1: return 'status-approved'
+    case 2: return 'status-rejected'
+    default: return ''
+  }
+}
+
+// 根据分类ID获取分类信息
+function getCategoryById(categoryId) {
+  return categories.find(c => c.id === categoryId) || categories[0]
+}
+
+// ================= 导航折叠功能 =================
+// 存储每个分类的折叠状态
+const collapsedCategories = ref({})
+
+// 切换分类折叠状态
+function toggleCategory(categoryId) {
+  collapsedCategories.value[categoryId] = !collapsedCategories.value[categoryId]
+}
+
+// 检查分类是否折叠
+function isCategoryCollapsed(categoryId) {
+  return collapsedCategories.value[categoryId] || false
+}
+
+// 从后端拉取题库
+async function fetchQuestions() {
+  try {
+    const res = await fetch(`${API_BASE}/question/list`)
+    const data = await res.json()
+
+    if (data.code === 200) {
+      // 🔥 数据清洗流水线
+      questions.value = data.data.map(q => {
+        // 1. 处理选项：把字符串 "['A','B']" 转成数组 ['A','B']
+        if (typeof q.options === 'string') {
+          try {
+            q.options = JSON.parse(q.options)
+          } catch (e) {
+            q.options = [] // 解析失败给个空数组
+          }
+        }
+
+        // 2. 处理解析字段名：数据库叫 explanation，前端模板里用的 explain
+        // 如果你不想改模板，就在这里赋值一下
+        if (!q.explain && q.explanation) {
+          q.explain = q.explanation
+        }
+
+        return q
+      })
+
+      // 默认选中第一题 (如果列表不为空)
+      if (questions.value.length > 0) {
+        enterQuestion(questions.value[0])
+      }
+    }
+  } catch (e) {
+    console.error("加载题库失败", e)
+    alert("题库加载失败，请检查后端服务")
+  }
+}
 </script>
 
 <template>
@@ -283,7 +504,7 @@ async function deleteComment(comment) {
     
     <header class="navbar">
       <div class="brand">
-        <span class="logo-icon">⚡</span> EazyExam <span class="sub-brand">轻松刷题社区</span>
+        <span class="logo-icon">⚡</span> EasyExam <span class="sub-brand"></span>
       </div>
       <div v-if="isLoggedIn" class="user-info">
         <div class="avatar-circle">{{ currentUser.username ? currentUser.username[0].toUpperCase() : 'U' }}</div>
@@ -291,7 +512,9 @@ async function deleteComment(comment) {
           <span class="u-name">{{ currentUser.username }}</span>
           <span class="u-role">{{ currentUser.role === 'ADMIN' ? 'Admin' : 'User' }}</span>
         </div>
-        <button v-if="currentUser.role === 'ADMIN'" @click="showAdminPanel = !showAdminPanel" class="nav-btn">{{ showAdminPanel ? '刷题去' : '管后台' }}</button>
+        <button v-if="currentUser.role === 'ADMIN'" @click="showAdminPanel = !showAdminPanel" class="nav-btn">{{ showAdminPanel ? '刷题' : '管理后台' }}</button>
+        <button @click="showUploadPanel = true" class="nav-btn">📝 上传题目</button>
+        <button @click="showMyUploadsPanel = true; fetchMyUploads()" class="nav-btn">📂 我的上传</button>
         <button @click="handleLogout" class="nav-btn ghost">退出</button>
       </div>
     </header>
@@ -300,7 +523,7 @@ async function deleteComment(comment) {
       <div class="login-card">
         <div class="login-header">
           <h1>{{ isRegisterMode ? '🚀 创建新账号' : '👋 Hi, Welcome!' }}</h1>
-          <p>{{ isRegisterMode ? '加入 EazyExam，开启挑战' : '登录你的账号继续刷题' }}</p>
+          <p>{{ isRegisterMode ? '加入 EasyExam，开启挑战' : '登录你的账号继续刷题' }}</p>
         </div>
         
         <div class="input-group">
@@ -328,35 +551,70 @@ async function deleteComment(comment) {
 
     <div v-else class="main-body">
       <div v-if="showAdminPanel && currentUser.role === 'ADMIN'" class="admin-panel">
-        <div class="panel-header"><h3>🛡️ 用户管理</h3></div>
-        <table class="data-table">
-          <thead><tr><th>ID</th><th>用户</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody>
-            <tr v-for="u in userList" :key="u.id">
-              <td>#{{ u.id }}</td>
-              <td>{{ u.username }} <span v-if="u.totalReportCount>0" class="tag-report">{{u.totalReportCount}}🔥</span></td>
-              <td>{{ u.status }}</td>
-              <td>
-                <button v-if="u.role!=='ADMIN'" @click="openAudit(u)" class="btn-mini">审计</button>
-                <button v-if="u.status!=='BANNED' && u.role!=='ADMIN'" @click="changeStatus(u, 'BANNED')" class="btn-mini danger">禁言</button>
-                <button v-if="u.status==='BANNED'" @click="changeStatus(u, 'NORMAL')" class="btn-mini success">解封</button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <div v-if="auditModalVisible" class="modal-mask" @click.self="auditModalVisible=false">
-          <div class="modal-box">
-            <h4>用户 [{{ auditTargetUser }}] 发言</h4>
-            
-            <div v-for="c in auditComments" :key="c.id" class="audit-item">
-              <div class="audit-content">{{ c.content }}</div>
-              
-              <div class="audit-info">
-                <span>🕒 {{ c.createTime ? c.createTime.replace('T', ' ') : '未知时间' }}</span>
-                <span style="margin-left: 15px;">📍 题目 #{{ c.questionId }}</span>
+        <!-- 管理面板标签切换 -->
+        <div class="admin-tabs">
+          <button :class="['tab-btn', { active: !showReviewPanel }]" @click="showReviewPanel = false">👥 用户管理</button>
+          <button :class="['tab-btn', { active: showReviewPanel }]" @click="showReviewPanel = true; fetchPendingQuestions()">📋 题目审核</button>
+        </div>
+
+        <!-- 用户管理面板 -->
+        <div v-if="!showReviewPanel">
+          <div class="panel-header"><h3>🛡️ 用户管理</h3></div>
+          <table class="data-table">
+            <thead><tr><th>ID</th><th>用户</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr v-for="u in userList" :key="u.id">
+                <td>#{{ u.id }}</td>
+                <td>{{ u.username }} <span v-if="u.totalReportCount>0" class="tag-report">{{u.totalReportCount}}🔥</span></td>
+                <td>{{ u.status }}</td>
+                <td>
+                  <button v-if="u.role!=='ADMIN'" @click="openAudit(u)" class="btn-mini">审计</button>
+                  <button v-if="u.status!=='BANNED' && u.role!=='ADMIN'" @click="changeStatus(u, 'BANNED')" class="btn-mini danger">禁言</button>
+                  <button v-if="u.status==='BANNED'" @click="changeStatus(u, 'NORMAL')" class="btn-mini success">解封</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-if="auditModalVisible" class="modal-mask" @click.self="auditModalVisible=false">
+            <div class="modal-box">
+              <h4>用户 [{{ auditTargetUser }}] 发言</h4>
+
+              <div v-for="c in auditComments" :key="c.id" class="audit-item">
+                <div class="audit-content">{{ c.content }}</div>
+
+                <div class="audit-info">
+                  <span>🕒 {{ c.createTime ? c.createTime.replace('T', ' ') : '未知时间' }}</span>
+                  <span style="margin-left: 15px;">📍 题目 #{{ c.questionId }}</span>
+                </div>
+              </div>
+              <button @click="auditModalVisible=false" style="width:100%;margin-top:10px">关闭</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 题目审核面板 -->
+        <div v-else>
+          <div class="panel-header"><h3>📋 待审核题目列表</h3></div>
+          <div v-if="pendingQuestions.length === 0" class="empty-state">暂无待审核题目</div>
+          <div v-else class="review-list">
+            <div v-for="q in pendingQuestions" :key="q.id" class="review-item">
+              <div class="review-header">
+                <span class="review-type">{{ getCategoryById(q.type).icon }} {{ getCategoryById(q.type).name }}</span>
+                <span class="review-id">#{{ q.id }}</span>
+              </div>
+              <div class="review-title">{{ q.title }}</div>
+              <div v-if="q.options && JSON.parse(q.options).length > 0" class="review-options">
+                <div v-for="(opt, idx) in JSON.parse(q.options)" :key="idx" class="review-option">{{ opt }}</div>
+              </div>
+              <div class="review-meta">
+                <span class="review-answer">✅ 正确答案: {{ q.answer }}</span>
+                <span v-if="q.explanation" class="review-explanation">💡 {{ q.explanation }}</span>
+              </div>
+              <div class="review-actions">
+                <button @click="reviewQuestion(q.id, 1)" class="btn-mini success">✓ 通过</button>
+                <button @click="reviewQuestion(q.id, 2)" class="btn-mini danger">✗ 拒绝</button>
               </div>
             </div>
-            <button @click="auditModalVisible=false" style="width:100%;margin-top:10px">关闭</button>
           </div>
         </div>
       </div>
@@ -366,8 +624,12 @@ async function deleteComment(comment) {
           <div class="card-header">题库导航</div>
           <div class="card-content">
             <div v-for="group in sidebarGroups" :key="group.meta.id" class="nav-group">
-              <div class="group-label" :style="{ color: group.meta.color }">{{ group.meta.icon }} {{ group.meta.name }}</div>
-              <div class="group-items">
+              <div class="group-label" :style="{ color: group.meta.color }" @click="toggleCategory(group.meta.id)">
+                <span class="group-icon">{{ group.meta.icon }}</span>
+                <span class="group-name">{{ group.meta.name }}</span>
+                <span class="collapse-icon">{{ isCategoryCollapsed(group.meta.id) ? '▶' : '▼' }}</span>
+              </div>
+              <div v-show="!isCategoryCollapsed(group.meta.id)" class="group-items">
                 <div v-for="(q, idx) in group.list" :key="q.id" @click="enterQuestion(q)"
                      :class="['nav-item', { active: currentQuestion && currentQuestion.id === q.id }]"
                      :style="currentQuestion && currentQuestion.id === q.id ? { backgroundColor: group.meta.color } : {}">
@@ -441,6 +703,77 @@ async function deleteComment(comment) {
         </main>
       </div>
     </div>
+
+    <!-- 上传题目弹窗 -->
+    <div v-if="showUploadPanel" class="modal-mask" @click.self="showUploadPanel = false">
+      <div class="modal-box upload-modal">
+        <h3>📝 上传新题目</h3>
+        <div class="upload-form">
+          <div class="form-group">
+            <label>题目分类</label>
+            <select v-model="uploadForm.categoryId" class="form-select">
+              <option v-for="cat in categories" :key="cat.id" :value="cat.id">
+                {{ cat.icon }} {{ cat.name }}
+              </option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>题目内容</label>
+            <textarea v-model="uploadForm.title" class="form-textarea" placeholder="请输入题目内容..." rows="3"></textarea>
+          </div>
+
+          <div class="form-group">
+            <label>选项设置</label>
+            <div v-for="(opt, idx) in uploadForm.options" :key="idx" class="option-input-group">
+              <span class="option-label">{{ String.fromCharCode(65 + idx) }}.</span>
+              <input v-model="uploadForm.options[idx]" class="form-input" placeholder="选项内容" />
+              <button v-if="uploadForm.options.length > 2" @click="removeOption(idx)" class="btn-remove">✕</button>
+            </div>
+            <button v-if="uploadForm.options.length < 8" @click="addOption" class="btn-add-option">+ 添加选项</button>
+          </div>
+
+          <div class="form-group">
+            <label>正确答案</label>
+            <input v-model="uploadForm.answer" class="form-input" placeholder="如：A" />
+          </div>
+
+          <div class="form-group">
+            <label>题目解析（可选）</label>
+            <textarea v-model="uploadForm.explanation" class="form-textarea" placeholder="请输入题目解析..." rows="2"></textarea>
+          </div>
+
+          <div class="form-actions">
+            <button @click="showUploadPanel = false" class="btn-cancel">取消</button>
+            <button @click="uploadQuestion" class="btn-submit">提交审核</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 我的上传记录弹窗 -->
+    <div v-if="showMyUploadsPanel" class="modal-mask" @click.self="showMyUploadsPanel = false">
+      <div class="modal-box uploads-modal">
+        <h3>📂 我的上传记录</h3>
+        <div v-if="myUploads.length === 0" class="empty-state">暂无上传记录</div>
+        <div v-else class="uploads-list">
+          <div v-for="q in myUploads" :key="q.id" class="upload-item">
+            <div class="upload-header">
+              <span class="upload-type">{{ getCategoryById(q.type).icon }} {{ getCategoryById(q.type).name }}</span>
+              <span :class="['status-badge', getReviewStatusClass(q.reviewStatus)]">
+                {{ getReviewStatusText(q.reviewStatus) }}
+              </span>
+            </div>
+            <div class="upload-title">{{ q.title }}</div>
+            <div class="upload-meta">
+              <span>答案: {{ q.answer }}</span>
+              <span class="upload-id">#{{ q.id }}</span>
+            </div>
+          </div>
+        </div>
+        <button @click="showMyUploadsPanel = false" class="btn-close-modal">关闭</button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -481,7 +814,36 @@ async function deleteComment(comment) {
 .sidebar-card { width: 280px; background: white; border-radius: 20px; padding: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.03); position: sticky; top: 20px; }
 .card-header { font-weight: bold; margin-bottom: 20px; color: #333; }
 .nav-group { margin-bottom: 15px; }
-.group-label { font-size: 13px; font-weight: bold; margin-bottom: 8px; padding-left: 5px; opacity: 0.8; }
+.group-label {
+  font-size: 13px;
+  font-weight: bold;
+  margin-bottom: 8px;
+  padding-left: 5px;
+  padding-right: 8px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 8px;
+  transition: background 0.2s;
+}
+.group-label:hover {
+  background: #f5f5f5;
+}
+.group-icon {
+  font-size: 14px;
+}
+.group-name {
+  flex: 1;
+}
+.collapse-icon {
+  font-size: 10px;
+  color: #999;
+  transition: transform 0.2s;
+}
 .group-items { display: flex; flex-wrap: wrap; gap: 8px; }
 .nav-item { width: 36px; height: 36px; display: flex; justify-content: center; align-items: center; border-radius: 12px; background: #f8f9fa; color: #666; cursor: pointer; font-weight: bold; font-size: 14px; transition: 0.2s; }
 .nav-item:hover, .nav-item.active { transform: scale(1.1); color: white; }
@@ -598,5 +960,342 @@ async function deleteComment(comment) {
   font-size: 12px;
   color: #ccc;      /* 浅灰色 */
   font-weight: normal; /* 取消粗体 */
+}
+
+/* ================= 新增样式：管理员面板标签 ================= */
+.admin-tabs {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 20px;
+  border-bottom: 2px solid #f0f0f0;
+  padding-bottom: 10px;
+}
+
+.tab-btn {
+  padding: 10px 20px;
+  border: none;
+  background: transparent;
+  color: #666;
+  cursor: pointer;
+  font-weight: bold;
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+
+.tab-btn.active {
+  background: #764ba2;
+  color: white;
+}
+
+.tab-btn:hover:not(.active) {
+  background: #f0f0f0;
+}
+
+/* ================= 新增样式：题目审核列表 ================= */
+.review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.review-item {
+  background: #f9f9f9;
+  padding: 20px;
+  border-radius: 12px;
+  border: 1px solid #eee;
+}
+
+.review-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.review-type {
+  background: #e3f2fd;
+  color: #1976d2;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.review-id {
+  color: #999;
+  font-size: 12px;
+}
+
+.review-title {
+  font-size: 16px;
+  font-weight: bold;
+  color: #333;
+  margin-bottom: 15px;
+  line-height: 1.5;
+}
+
+.review-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 15px;
+}
+
+.review-option {
+  padding: 8px 12px;
+  background: white;
+  border-radius: 6px;
+  border: 1px solid #eee;
+  font-size: 14px;
+}
+
+.review-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 15px;
+  margin-bottom: 15px;
+  font-size: 14px;
+}
+
+.review-answer {
+  color: #27ae60;
+  font-weight: bold;
+}
+
+.review-explanation {
+  color: #7f8c8d;
+}
+
+.review-actions {
+  display: flex;
+  gap: 10px;
+}
+
+/* ================= 新增样式：上传题目弹窗 ================= */
+.upload-modal {
+  width: 500px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.upload-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.form-group label {
+  font-weight: bold;
+  color: #333;
+  font-size: 14px;
+}
+
+.form-select,
+.form-input,
+.form-textarea {
+  padding: 10px 12px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.form-select:focus,
+.form-input:focus,
+.form-textarea:focus {
+  border-color: #764ba2;
+}
+
+.form-textarea {
+  resize: vertical;
+  font-family: inherit;
+}
+
+.option-input-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.option-label {
+  font-weight: bold;
+  color: #764ba2;
+  width: 25px;
+}
+
+.option-input-group .form-input {
+  flex: 1;
+}
+
+.btn-remove {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: #ffecec;
+  color: #e74c3c;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-remove:hover {
+  background: #ffd6d6;
+}
+
+.btn-add-option {
+  padding: 8px 12px;
+  border: 1px dashed #764ba2;
+  background: transparent;
+  color: #764ba2;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  align-self: flex-start;
+}
+
+.btn-add-option:hover {
+  background: #f3e5f5;
+}
+
+.form-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.btn-cancel {
+  padding: 10px 20px;
+  border: 1px solid #ddd;
+  background: white;
+  color: #666;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: bold;
+}
+
+.btn-cancel:hover {
+  background: #f5f5f5;
+}
+
+.btn-submit {
+  padding: 10px 20px;
+  border: none;
+  background: #764ba2;
+  color: white;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: bold;
+}
+
+.btn-submit:hover {
+  background: #6b3aa0;
+}
+
+/* ================= 新增样式：我的上传记录弹窗 ================= */
+.uploads-modal {
+  width: 500px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.uploads-list {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.upload-item {
+  background: #f9f9f9;
+  padding: 15px;
+  border-radius: 10px;
+  border: 1px solid #eee;
+}
+
+.upload-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.upload-type {
+  background: #e3f2fd;
+  color: #1976d2;
+  padding: 3px 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.status-badge {
+  padding: 3px 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.status-pending {
+  background: #fff3cd;
+  color: #856404;
+}
+
+.status-approved {
+  background: #d4edda;
+  color: #155724;
+}
+
+.status-rejected {
+  background: #f8d7da;
+  color: #721c24;
+}
+
+.upload-title {
+  font-size: 14px;
+  font-weight: bold;
+  color: #333;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+.upload-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #999;
+}
+
+.upload-id {
+  color: #bbb;
+}
+
+.btn-close-modal {
+  width: 100%;
+  padding: 12px;
+  border: none;
+  background: #f5f5f5;
+  color: #666;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: bold;
+  margin-top: 20px;
+}
+
+.btn-close-modal:hover {
+  background: #eee;
 }
 </style>
